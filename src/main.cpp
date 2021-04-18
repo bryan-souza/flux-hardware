@@ -12,6 +12,7 @@
 // Set network preferences namespace
 Preferences netman;
 
+// *********************** WIFI *****************************
 std::string getEncryptionType(int encType) {
     // read the encryption type and print out the name:
     switch (encType) {
@@ -56,12 +57,38 @@ std::string netDiscover() {
     return output;
 };
 
+void connect() {
+    // Connect to AP
+    int status;
+    for (size_t i = 0; i <= 6; i++) {
+        status = WiFi.begin( 
+            netman.getString("ssid").c_str(), 
+            netman.getString("pwd").c_str() 
+        );
+
+        if (status != WL_CONNECTED) {
+            Serial.println("Connection failed! Reconnecting...");
+            delay(10000);
+        } else {
+            digitalWrite(STATUS_LED, HIGH);
+            Serial.println("Connection established");
+            break;
+        }
+    }
+}
+// **********************************************************
+
+// ************************* BLE ****************************
 class ServerCallbacks: public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pServer) {
         digitalWrite(STATUS_LED, HIGH);
+        delay(500);
+        digitalWrite(STATUS_LED, LOW);
     };
 
     void onDisconnect(NimBLEServer* pServer) {
+        digitalWrite(STATUS_LED, HIGH);
+        delay(500);
         digitalWrite(STATUS_LED, LOW);
     };
 };
@@ -131,23 +158,32 @@ class setterCallbacks: public NimBLECharacteristicCallbacks {
         };
 
         try {
+            // Parse JSON parameters
             const char* ssid = doc["ssid"];
             const char* pwd = doc["pwd"];
-
-            // Parse JSON parameters
-            Serial.println(ssid);
-            Serial.println(pwd);
 
             // Save permanently for auto-reconnection
             netman.putString("ssid", ssid);
             netman.putString("pwd", pwd);
 
-            // TODO: Insert WiFi connection snippet here
-            netman.end(); // Close the network namespace
+            connect();
+            if (WiFi.status() == WL_CONNECTED) {
+                // Notify success
+                netSetter->setValue("Success");
+                netSetter->notify();
 
-            // Notify success
-            netSetter->setValue("Success");
-            netSetter->notify();
+                netman.end(); // Close the network namespace
+
+                /*
+                Shutdown the BLE server and remove
+                all BLE objects from memory
+                */
+                NimBLEDevice::deinit(true);
+            } else {
+                // Connection failed
+                netSetter->setValue("Connection failed! Try again");
+                netSetter->notify();
+            }
         } catch(const std::exception& e) {
             // Wrong JSON format
             netSetter->setValue("Wrong JSON format");
@@ -155,6 +191,42 @@ class setterCallbacks: public NimBLECharacteristicCallbacks {
         };
     };
 };
+
+void startBLE() {
+    // Start BLE server
+    Serial.print("Starting BLE Server...");
+    NimBLEDevice::init("ESP32");
+    static NimBLEServer* pServer = NimBLEDevice::createServer();
+    pServer->setCallbacks(new ServerCallbacks());
+
+    // Assign service
+    NimBLEService* netService = pServer->createService(SERVICE_UUID);
+
+    // Network scanner output
+    NimBLECharacteristic* netScanner = netService->createCharacteristic(SCANNER_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+    netScanner->setCallbacks(new scannerCallbacks());
+
+    // Network configuration setter
+    NimBLECharacteristic* netSetter = netService->createCharacteristic(SETTER_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+    netSetter->setCallbacks(new setterCallbacks());
+
+    // Start service
+    netService->start();
+
+    // Set advertising parameters
+    NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID);
+    pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
+    pAdvertising->setMaxPreferred(0x12);
+
+    // Broadcast server to clients
+    NimBLEDevice::startAdvertising();
+}
+// **********************************************************
+
+// ********************** HTTP SERVER ***********************
+// TODO: Insert HTTP Server code here
+// **********************************************************
 
 void setup() {
     Serial.begin(115200);
@@ -169,38 +241,17 @@ void setup() {
         // Credentials exist
         Serial.println("Credentials detected!");
 
+        // Connect to AP
+        connect();
+
         // Insert HTTP Server code here
+        Serial.println("Starting HTTP Server...");
     } else {
         // Credentials either doesn't exist or are corrupted
         Serial.println("Credentials either doesn't exist or are corrupted");
+
         // Start BLE server
-        Serial.print("Starting BLE Server...");
-        NimBLEDevice::init("ESP32");
-        static NimBLEServer* pServer = NimBLEDevice::createServer();
-        pServer->setCallbacks(new ServerCallbacks());
-
-        // Assign service
-        NimBLEService* netService = pServer->createService(SERVICE_UUID);
-
-        // Network scanner output
-        NimBLECharacteristic* netScanner = netService->createCharacteristic(SCANNER_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
-        netScanner->setCallbacks(new scannerCallbacks());
-
-        // Network configuration setter
-        NimBLECharacteristic* netSetter = netService->createCharacteristic(SETTER_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
-        netSetter->setCallbacks(new setterCallbacks());
-
-        // Start service
-        netService->start();
-
-        // Set advertising parameters
-        NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
-        pAdvertising->addServiceUUID(SERVICE_UUID);
-        pAdvertising->setMinPreferred(0x06);  // functions that help with iPhone connections issue
-        pAdvertising->setMaxPreferred(0x12);
-
-        // Broadcast server to clients
-        NimBLEDevice::startAdvertising();
+        startBLE();
     }
 }
 
