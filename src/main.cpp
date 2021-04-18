@@ -1,6 +1,8 @@
-#include <NimBLEDevice.h>
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <WiFi.h>
 
@@ -9,8 +11,16 @@
 #define SCANNER_UUID "0909c9fc-a6a4-4cbe-8520-1377e6b45d11"
 #define STATUS_LED 2
 
+// *********************** GLOBALS **************************
 // Set network preferences namespace
 Preferences netman;
+
+// Async Web Server instance
+AsyncWebServer server(80);
+
+// Async WebSocket instance;
+AsyncWebSocket ws("/ws");
+// **********************************************************
 
 // *********************** WIFI *****************************
 std::string getEncryptionType(int encType) {
@@ -225,7 +235,20 @@ void startBLE() {
 // **********************************************************
 
 // ********************** HTTP SERVER ***********************
-// TODO: Insert HTTP Server code here
+void onWSEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
+    switch (type) {
+        case WS_EVT_CONNECT:
+            // On client connect
+            client->printf( "Hello Client %u :)", client->id() );
+            client->ping(); // Send ping request
+            break;
+        case WS_EVT_DISCONNECT:
+            // <OPTIONAL> Handle client disconnect
+            break;
+        default:
+            break;
+    }
+}
 // **********************************************************
 
 void setup() {
@@ -236,16 +259,25 @@ void setup() {
     netman.begin("netman", false);
     // netman.clear(); // Clear the current credentials
 
+    // TODO: Refactor this code section to reduce redundancy
     // Check for existing WiFi credentials
     if ( (netman.getString("ssid") != "") && (netman.getString("pwd") != "") ) {
         // Credentials exist
         Serial.println("Credentials detected!");
 
-        // Connect to AP
-        connect();
+        WiFi.mode(WIFI_STA); // Set WiFi mode to station
+        connect(); // Connect to AP
 
-        // Insert HTTP Server code here
+        // Show local IP address for connection
+        Serial.print("IP Address: ");
+        Serial.println(WiFi.localIP());
+
+        // HTTP Server section
         Serial.println("Starting HTTP Server...");
+        ws.onEvent(onWSEvent); // Assing WebSocket event handler
+        server.addHandler(&ws); // Assign to Server
+        server.begin();
+
     } else {
         // Credentials either doesn't exist or are corrupted
         Serial.println("Credentials either doesn't exist or are corrupted");
