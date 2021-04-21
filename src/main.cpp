@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
-// #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
@@ -40,127 +39,85 @@ class ServerCallbacks : public NimBLEServerCallbacks
     };
 };
 
-class ScannerCallbacks : public NimBLECharacteristicCallbacks
+class NetworkingCallbacks : public NimBLECharacteristicCallbacks
 {
     /*
-    This function should receive a JSON string
-    {"opcode": 76} -> Scan for Wireless APs
+        This function should receive a JSON object
+        {"ssid": "network_ssid", "pwd":""}
+            -> set network credentials
+        {anything else}
+            -> scan for local APs
     */
-    void onWrite(NimBLECharacteristic *netScanner)
+    void onWrite(NimBLECharacteristic *netChar)
     {
-        DynamicJsonDocument opcode_json(1024); // JSON Object for parsing opcodes
-        DeserializationError error = deserializeJson(opcode_json, netScanner->getValue());
+        DynamicJsonDocument js_input(1024); // JSON Object for parsing opcodes
+        deserializeJson(js_input, netChar->getValue());
 
-        if (error)
+        if (js_input.containsKey("ssid"))
         {
-            // JSON parsing error
-            netScanner->setValue("JSON parsing error");
-            netScanner->notify(true);
-        };
-
-        try
-        {
+        /*
+        Accepts:
+        {"ssid": "some_ssid", "pwd": "passwrd"}
+        {"ssid": "some_ssid", "pwd": ""}
+        {"ssid": "some_ssid"}
+        */
             // Parse JSON parameters
-            int opcode = opcode_json["opcode"];
+            const char *ssid = js_input["ssid"];
+            const char *pwd = (!js_input["pwd"].isNull()) ? (const char*)js_input["pwd"] : "";
 
-            /* 
-            NOTE TO SELF:
-                If you intend to use more than one opcode
-                for this service, please refactor this section
-                for better code performance and readiness
+            /*
+            If at least the network SSID
+            is given, save credentials
             */
-            if (opcode == 76)
+            if (ssid != "")
             {
-                DynamicJsonDocument networks(1024); // JSON object to store all network objects
-                const char *authTypes[5] = {"Open", "WEP", "WPA", "WPA2", "Auto"};
+                // Save permanently for auto-reconnection
+                netman.putString("ssid", ssid);
+                netman.putString("pwd", pwd);
 
-                // scan for nearby networks:
-                int contSSID = WiFi.scanNetworks();
-
-                // print the network number and name for each network found:
-                DynamicJsonDocument network(256); // JSON object to store network characteristics
-                for (int i = 0; i < contSSID; i++)
-                {
-                    network["ssid"] = WiFi.SSID(i);
-                    network["rssi"] = WiFi.RSSI(i);
-                    int auth = WiFi.encryptionType(i);
-                    network["auth"] = (auth <= 4) ? authTypes[auth] : "Unknown";
-                    networks["networks"][i] = network;
-                };
-
-                std::string output;
-                serializeJson(networks, output);
-
-                // Return detected networks
-                netScanner->setValue(output);
-                netScanner->notify(true);
-            }
+                // Notify success
+                netChar->setValue("Success");
+                netChar->notify(true);
+            } // If
             else
             {
-                /*
-                Notify the user that the given opcode
-                either got deprecated or wasn't
-                implemented yet
-                */
-                netScanner->setValue("OPCODE either got deprecated or not implemented yet");
-                netScanner->notify(true);
-            };
-        }
-        catch (const std::exception &e)
+                // Notify success
+                netChar->setValue("[E] SSID must not be empty!");
+                netChar->notify(true);
+            } // Else
+        } // If
+        else
         {
-            // Wrong JSON format
-            netScanner->setValue("Wrong JSON format");
-            netScanner->notify(true);
-        };
-    };
-};
+            // This will ensure that the user will
+            // get something as return
 
-class SetterCallbacks : public NimBLECharacteristicCallbacks
-{
-    /*
-    This function should receive a JSON string
-    {"ssid": "AP SSID", "pwd": "password"}
-    */
-    void onWrite(NimBLECharacteristic *netSetter)
-    {
-        std::string credentials_json = netSetter->getValue();
-        DynamicJsonDocument credentials(1024);
-        DeserializationError error = deserializeJson(credentials, credentials_json);
+            // Scan for wireless APs
+            DynamicJsonDocument networks(1024); // JSON object to store all network objects
+            const char *authTypes[5] = {"Open", "WEP", "WPA", "WPA2", "Auto"};
 
-        if (error)
-        {
-            // JSON parsing error
-            netSetter->setValue("JSON parsing error");
-            netSetter->notify(true);
-        };
+            // scan for nearby networks:
+            int contSSID = WiFi.scanNetworks();
 
-        try
-        {
-            // Parse JSON parameters
-            const String ssid = credentials["ssid"];
-            const String pwd  = credentials["pwd"];
+            // print the network number and name for each network found:
+            DynamicJsonDocument network(256); // JSON object to store network characteristics
+            for (int i = 0; i < contSSID; i++)
+            {
+                network["ssid"] = WiFi.SSID(i);
+                network["rssi"] = WiFi.RSSI(i);
+                int auth = WiFi.encryptionType(i);
+                network["auth"] = (auth <= 4) ? authTypes[auth] : "Unknown";
+                networks["networks"][i] = network;
+            }; // For
 
-            // Save permanently for auto-reconnection
-            netman.putString("ssid", ssid);
-            netman.putString("pwd", pwd);
-            // netman.end();
+            std::string output;
+            serializeJson(networks, output);
 
-            // Notify success
-            netSetter->setValue("Success");
-            netSetter->notify(true);
-
-            // Stops BLE and removes everything from memory
-            NimBLEDevice::deinit(true);
-        }
-        catch (const std::exception &e)
-        {
-            // Wrong JSON format
-            netSetter->setValue("Wrong JSON format");
-            netSetter->notify(true);
-        };
-    };
-};
-
+            // Return detected networks
+            netChar->setValue(output);
+            netChar->notify(true);
+        }; // Else
+    };     // onWrite
+};         // scannerCallbacks
 // **********************************************************
 
 // ********************** HTTP SERVER ***********************
@@ -190,19 +147,18 @@ void setup()
 
     // Open the network namespace
     netman.begin("netman", false);
-    // netman.clear(); // Clear the current credentials
-    
-    WiFi.mode(WIFI_STA); // Set WiFi mode to station
+    netman.clear(); // Clear the current credentials
+
     while (true)
-    {   
+    {
         // Try to connect to AP
-        if ( netman.getString("ssid") != "" && netman.getString("pwd") != "" ) {
+        if (netman.getString("ssid") != "" && netman.getString("pwd") != "")
+        {
             for (size_t i = 0; i <= 6; i++)
             {
                 int status = WiFi.begin(
                     netman.getString("ssid").c_str(),
-                    netman.getString("pwd").c_str()
-                );
+                    netman.getString("pwd").c_str());
 
                 if (status == WL_CONNECTED)
                 {
@@ -216,10 +172,12 @@ void setup()
         }
 
         // Exit loop if connected
-        if (WiFi.status() == WL_CONNECTED) break;
+        if (WiFi.status() == WL_CONNECTED)
+            break;
 
         // Start the BLE server if not already running
-        if (NimBLEDevice::getInitialized() == false) {
+        if (NimBLEDevice::getInitialized() == false)
+        {
             // Start BLE server
             NimBLEDevice::init("ESP32");
             static NimBLEServer *pServer = NimBLEDevice::createServer();
@@ -228,17 +186,10 @@ void setup()
             // Assign service
             NimBLEService *netService = pServer->createService(SERVICE_UUID);
 
-            // Network scanner output
-            NimBLECharacteristic *netScanner = netService->createCharacteristic(
-                SCANNER_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY
-            );
-            netScanner->setCallbacks(new ScannerCallbacks());
-
-            // Network configuration setter
-            NimBLECharacteristic *netSetter = netService->createCharacteristic(
-                SETTER_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY
-            );
-            netSetter->setCallbacks(new SetterCallbacks());
+            // Networking characteristic
+            NimBLECharacteristic *netChar = netService->createCharacteristic(
+                SCANNER_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+            netChar->setCallbacks(new NetworkingCallbacks());
 
             // Start service
             netService->start();
