@@ -5,40 +5,26 @@
 #include <Preferences.h>
 #include <WiFi.h>
 
-#define SCANNER_UUID "0909c9fc-a6a4-4cbe-8520-1377e6b45d11"
+#define NETWORKING_UUID "0909c9fc-a6a4-4cbe-8520-1377e6b45d11"
 #define SERVICE_UUID "4782188b-8c6a-4ed1-8984-7a9a1467da56"
-#define SETTER_UUID "c5bf2cdc-6d1d-48fc-aa1c-b3a1202a4a88"
 #define STATUS_LED 2
 
 // *********************** GLOBALS **************************
 // Set network preferences namespace
 Preferences netman;
 
-// Async Web Server instance
-AsyncWebServer server(80);
+// BLE parameters
+static NimBLEServer *pServer; // BLE server object
+static NimBLEService *netService; // Main service
+static NimBLECharacteristic *netChar; // Main characteristic
+static NimBLEAdvertising *pAdvertising; // Adverstising handler
 
-// Async WebSocket instance;
+// WebServer parameters
+AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 // **********************************************************
 
 // ************************* BLE ****************************
-class ServerCallbacks : public NimBLEServerCallbacks
-{
-    void onConnect(NimBLEServer *pServer)
-    {
-        digitalWrite(STATUS_LED, HIGH);
-        delay(500);
-        digitalWrite(STATUS_LED, LOW);
-    };
-
-    void onDisconnect(NimBLEServer *pServer)
-    {
-        digitalWrite(STATUS_LED, HIGH);
-        delay(500);
-        digitalWrite(STATUS_LED, LOW);
-    };
-};
-
 class NetworkingCallbacks : public NimBLECharacteristicCallbacks
 {
     /*
@@ -63,7 +49,7 @@ class NetworkingCallbacks : public NimBLECharacteristicCallbacks
         */
             // Parse JSON parameters
             const char *ssid = js_input["ssid"];
-            const char *pwd = (!js_input["pwd"].isNull()) ? (const char*)js_input["pwd"] : "";
+            const char *pwd = (!js_input["pwd"].isNull()) ? (const char *)js_input["pwd"] : "";
 
             /*
             If at least the network SSID
@@ -74,18 +60,14 @@ class NetworkingCallbacks : public NimBLECharacteristicCallbacks
                 // Save permanently for auto-reconnection
                 netman.putString("ssid", ssid);
                 netman.putString("pwd", pwd);
-
-                // Notify success
-                netChar->setValue("Success");
-                netChar->notify(true);
             } // If
             else
             {
-                // Notify success
-                netChar->setValue("[E] SSID must not be empty!");
+                // Notify error
+                netChar->setValue( (std::string)"[E] SSID must not be empty!" );
                 netChar->notify(true);
             } // Else
-        } // If
+        }     // If
         else
         {
             // This will ensure that the user will
@@ -130,6 +112,10 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
         Serial.println("Client connected");
         client->printf("Hello Client %u :)", client->id());
         client->ping(); // Send ping request
+        
+        // Turn off BLE if running
+        if (NimBLEDevice::getInitialized()) NimBLEDevice::deinit(true);
+
         break;
     case WS_EVT_DISCONNECT:
         Serial.println("Client disconnected");
@@ -149,7 +135,7 @@ void setup()
     netman.begin("netman", false);
     netman.clear(); // Clear the current credentials
 
-    while (true)
+    while (WiFi.status() != WL_CONNECTED)
     {
         // Try to connect to AP
         if (netman.getString("ssid") != "" && netman.getString("pwd") != "")
@@ -171,33 +157,30 @@ void setup()
             }
         }
 
-        // Exit loop if connected
-        if (WiFi.status() == WL_CONNECTED)
-            break;
-
         // Start the BLE server if not already running
         if (NimBLEDevice::getInitialized() == false)
         {
             // Start BLE server
             NimBLEDevice::init("ESP32");
-            static NimBLEServer *pServer = NimBLEDevice::createServer();
-            pServer->setCallbacks(new ServerCallbacks());
+            pServer = NimBLEDevice::createServer();
 
             // Assign service
-            NimBLEService *netService = pServer->createService(SERVICE_UUID);
+            netService = pServer->createService(SERVICE_UUID);
 
             // Networking characteristic
-            NimBLECharacteristic *netChar = netService->createCharacteristic(
-                SCANNER_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+            netChar = netService->createCharacteristic(
+                NETWORKING_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
             netChar->setCallbacks(new NetworkingCallbacks());
 
             // Start service
             netService->start();
 
             // Set advertising parameters
-            NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
+            pAdvertising = NimBLEDevice::getAdvertising();
             pAdvertising->addServiceUUID(SERVICE_UUID);
-            pAdvertising->setMinPreferred(0x06); // functions that help with iPhone connections issue
+
+            // functions that help with iPhone connections issue
+            pAdvertising->setMinPreferred(0x06); 
             pAdvertising->setMaxPreferred(0x12);
 
             // Broadcast server to clients
@@ -205,9 +188,18 @@ void setup()
         }
     }
 
-    // Show local IP address for connection
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
+    /*
+    Converts the IPAddress object to
+    a parsable JSON object
+    */
+    DynamicJsonDocument json_ip(32);
+    json_ip["ip"] = WiFi.localIP().toString();
+    std::string ip;
+    serializeJson(json_ip, ip);
+
+    // Return the current IP address
+    netChar->setValue(ip);
+    netChar->notify(true);
 
     // HTTP Server section
     ws.onEvent(onWsEvent);  // Assing WebSocket event handler
