@@ -1,14 +1,3 @@
 {
-    "files.associations": {
-        "array": "cpp",
-        "deque": "cpp",
-        "list": "cpp",
-        "string": "cpp",
-        "unordered_map": "cpp",
-        "unordered_set": "cpp",
-        "vector": "cpp",
-        "initializer_list": "cpp",
-        "regex": "cpp"
-    },
-    "python.pythonPath": "/bin/python"
+    "idf.port": "/dev/ttyUSB0"
 }
