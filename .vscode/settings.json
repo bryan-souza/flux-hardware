@@ -1,3 +1,8 @@
 {
-    "idf.port": "/dev/ttyUSB0"
+    "idf.port": "/dev/ttyUSB0",
+    "idf.espIdfPath": "/home/bryan/esp/esp-idf",
+    "files.associations": {
+        "u8g2.h": "c"
+    },
+    
 }

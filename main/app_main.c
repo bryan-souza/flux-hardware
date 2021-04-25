@@ -1,12 +1,3 @@
-/* Wi-Fi Provisioning Manager Example
-
-   This example code is in the Public Domain (or CC0 licensed, at your option.)
-
-   Unless required by applicable law or agreed to in writing, this
-   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-   CONDITIONS OF ANY KIND, either express or implied.
-*/
-
 #include <stdio.h>
 #include <string.h>
 
@@ -19,14 +10,78 @@
 #include <esp_event.h>
 #include <nvs_flash.h>
 
+// Wi-Fi related
 #include <wifi_provisioning/manager.h>
 #include <wifi_provisioning/scheme_ble.h>
+
+// Display related
+#include <driver/gpio.h>
+#include <driver/spi_master.h>
+#include <u8g2.h>
+#include <sdkconfig.h>
+#include <u8g2_esp32_hal.h>
+
+// Sensor counter
+#include <freertos/queue.h>
+#include <freertos/portmacro.h>
+#include <driver/periph_ctrl.h>
+#include <driver/gpio.h>
+#include <driver/pcnt.h>
+
+// Display pins
+#define PIN_SDA 21
+#define PIN_SCL 22
+
+// Counter
+#define PCNT_TEST_UNIT      PCNT_UNIT_0
+#define PCNT_H_LIM_VAL      256
+#define PCNT_L_LIM_VAL      0
+#define PCNT_INPUT_SIG_IO   4 // GPIO PORT 4
+#define PCNT_INPUT_CTRL_IO  5 // CONTROL GPIO HIGH => CNTR++, LOW => CNTR--
+
+xQueueHandle pcnt_evt_queue; // Queue to handle pulse counter events
+pcnt_isr_handle_t user_isr_handle = NULL;
+
+typedef struct {
+    int unit;
+    uint32_t status;
+} pcnt_evt_t;
 
 static const char *TAG = "app";
 
 /* Signal Wi-Fi events on this event-group */
 const int WIFI_CONNECTED_EVENT = BIT0;
 static EventGroupHandle_t wifi_event_group;
+
+static void pcnt_init(void)
+{
+    pcnt_config_t pcnt_config = {
+        // Set GPIO input and control ports
+        .pulse_gpio_num = PCNT_INPUT_SIG_IO,
+        .ctrl_gpio_num = PCNT_INPUT_CTRL_IO,
+        .channel = PCNT_CHANNEL_0,
+        .unit = PCNT_TEST_UNIT,
+        // What to do on the positive / negative edge of pulse input?
+        .pos_mode = PCNT_COUNT_INC, // Increase the counter
+        .neg_mode = PCNT_COUNT_DIS, // Keep the counter as is
+        // What to do when control input is low / high?
+        .lctrl_mode = PCNT_MODE_REVERSE, // Reverse counting direction ( ++ => --)
+        .hctrl_mode = PCNT_MODE_KEEP, // Keep the counting mode as is
+        // Set the min / max values to watch
+        .counter_h_lim = PCNT_H_LIM_VAL,
+        .counter_l_lim = PCNT_L_LIM_VAL
+    };
+
+    // Initialize PCNT unit
+    pcnt_unit_config(&pcnt_config);
+
+    // Initialize PCNT counter
+    pcnt_counter_pause(PCNT_TEST_UNIT);
+    pcnt_counter_clear(PCNT_TEST_UNIT);
+    
+    // Start counting
+    pcnt_counter_resume(PCNT_TEST_UNIT);
+}
 
 /* Event handler for catching system events */
 static void event_handler(void* arg, esp_event_base_t event_base,
@@ -91,6 +146,55 @@ static void get_device_service_name(char *service_name, size_t max)
     snprintf(service_name, max, "%s%02X%02X%02X",
              ssid_prefix, eth_mac[3], eth_mac[4], eth_mac[5]);
 }
+
+u8g2_t display_init(void) 
+{
+    /* Initialize the display */
+    u8g2_esp32_hal_t u8g2_esp32_hal = U8G2_ESP32_HAL_DEFAULT;
+	u8g2_esp32_hal.sda   = PIN_SDA;
+	u8g2_esp32_hal.scl  = PIN_SCL;
+	u8g2_esp32_hal_init(u8g2_esp32_hal);
+
+	u8g2_t display; // a structure which will contain all the data for one display
+	u8g2_Setup_ssd1306_i2c_128x64_vcomh0_f(
+		&display,
+		U8G2_R0,
+		u8g2_esp32_i2c_byte_cb,
+		u8g2_esp32_gpio_and_delay_cb);  // init u8g2 structure
+	u8x8_SetI2CAddress(&display.u8x8,0x78);
+
+	u8g2_InitDisplay(&display); // send init sequence to the display, display is in sleep mode after this,
+	u8g2_SetPowerSave(&display, 0); // wake up display
+	u8g2_ClearBuffer(&display); // Clear command buffer
+    u8g2_SetFont(&display, u8g2_font_6x12_mf);
+    u8g2_DrawUTF8(&display, 0, 10, "Volume    :    0 L");
+    u8g2_DrawUTF8(&display, 0, 20, "Vazão     :    0 L/min");
+    u8g2_DrawBox(&display, 0, 30, 63, 5);
+    u8g2_DrawUTF8(&display, 0, 35, "Vol. Total:    0 m³");
+    u8g2_SendBuffer(&display); // Clear screen
+    
+    return display;
+}
+
+static void update_values(u8g2_t display, float flux, float vol, float total_vol)
+{       
+    char buffer[128];
+    snprintf(buffer, 128, "Volume    : %.4f", vol);
+
+    // Update visor values
+    u8g2_ClearBuffer(&display); // Clear command buffer
+    u8g2_DrawUTF8(&display, 0, 10, buffer);
+
+    snprintf(buffer, 128, "Vazão     : %.4f", flux);
+    u8g2_DrawUTF8(&display, 0, 20, buffer);
+    
+    // u8g2_DrawBox(&display, 0, 30, 63, 5);
+
+    snprintf(buffer, 128, "Vol. Total: %.4f", total_vol);
+    u8g2_DrawUTF8(&display, 0, 35, buffer);
+    u8g2_SendBuffer(&display); // Clear screen
+}
+
 
 void app_main(void)
 {
@@ -198,4 +302,34 @@ void app_main(void)
 
     /* Wait for Wi-Fi connection */
     xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_EVENT, false, true, portMAX_DELAY);
+
+    // Display
+    u8g2_t display = display_init();    
+
+    // PCNT event queue
+    pcnt_evt_queue = xQueueCreate(10, sizeof(pcnt_evt_t));
+    pcnt_init();
+
+    int16_t count = 0;
+    float total_vol = 0;
+    pcnt_evt_t evt;
+    portBASE_TYPE res;
+
+    while(1)
+    {
+        // Wait for event information
+        res = xQueueReceive(pcnt_evt_queue, &evt, 1000 / portTICK_PERIOD_MS);
+        pcnt_get_counter_value(PCNT_TEST_UNIT, &count);
+        printf("Current counter value: %d\n", count);
+
+        float flux = (count / 4.5); // Vazão em L/min
+        // float flux = (count / 4.5) * 60000; // Vazão em m³/s
+        float vol = flux / 60; // Volume do ultimo segundo em L
+        total_vol += vol;
+
+        update_values(display, flux, vol, total_vol);
+
+        pcnt_counter_clear(PCNT_TEST_UNIT); // Reset the counter
+    }
+
 }
